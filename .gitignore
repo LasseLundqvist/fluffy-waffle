@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+*.pyo
+.env
+.env.*
+cpi_nowcast/data/cache/*.parquet
+cpi_nowcast/output/reports/*.html
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.coverage

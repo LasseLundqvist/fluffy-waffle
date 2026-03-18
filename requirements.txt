@@ -8,6 +8,17 @@ statsmodels>=0.14.0
 scipy>=1.10.0
 jupyter>=1.0.0
 notebook>=7.0.0
-# Valgfrit – bedre produktmatching:
-# fuzzywuzzy>=0.18.0
-# python-Levenshtein>=0.25.0
+
+# CPI nowcast additions
+pyarrow>=14.0
+scikit-learn>=1.4
+fredapi>=0.5
+pytrends>=4.9
+plotly>=5.18
+kaleido>=0.2
+click>=8.1
+python-dotenv>=1.0
+tenacity>=8.2
+tqdm>=4.66
+pytest>=7.4
+pytest-cov>=4.1
