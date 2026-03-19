@@ -79,10 +79,12 @@ class MIDASModel:
         n_lags: int = 22,
         degree: int = MODEL_CFG.midas_degree,
         lambda_reg: float = MODEL_CFG.ridge_alpha,
+        horizon: int = 1,
     ) -> None:
         self.n_lags = n_lags
         self.degree = degree
         self.lambda_reg = lambda_reg
+        self.horizon = horizon
 
         self._scaler = StandardScaler()
         self._theta: dict[str, np.ndarray] = {}
@@ -170,10 +172,12 @@ class MIDASModel:
 
         In this mode the Almon polynomial degenerates; equivalent to Ridge.
         """
+        # Direct multi-step: target at horizon h is y(t+h) = y.shift(-h)
+        y_h = y.shift(-self.horizon) if self.horizon > 1 else y
         # Drop all-NaN columns (e.g. bdi before ETF launch) before row dropna
         X_clean = X.dropna(axis=1, how="all")
         self._feature_cols = X_clean.columns.tolist()
-        df = pd.concat([y.rename("y"), X_clean], axis=1).dropna()
+        df = pd.concat([y_h.rename("y"), X_clean], axis=1).dropna()
         if df.empty:
             raise ValueError("MIDAS (monthly fallback): no valid observations.")
 

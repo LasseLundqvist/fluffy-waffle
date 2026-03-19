@@ -9,7 +9,7 @@ Mimics pseudo-real-time forecasting:
 from __future__ import annotations
 
 import logging
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Sequence
 
 import numpy as np
 import pandas as pd
@@ -187,3 +187,121 @@ def run_backtest(
         len(df), metrics_df[["rmse", "mae", "mfe"]].round(4).to_string(),
     )
     return df, metrics_df
+
+
+# ---------------------------------------------------------------------------
+# Multi-horizon backtest
+# ---------------------------------------------------------------------------
+
+def run_multihorizon_backtest(
+    X: pd.DataFrame,
+    y: pd.Series,
+    horizons: Sequence[int] = (1, 2, 3, 4, 5, 6),
+    bridge_kwargs: Optional[dict] = None,
+    midas_kwargs: Optional[dict] = None,
+    start_date: str = BACKTEST_START,
+    min_train: int = MIN_TRAIN_MONTHS,
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Direct multi-step expanding-window backtest for horizons h = 1..6.
+
+    For each horizon h, a separate Bridge and MIDAS model is trained with
+    ``horizon=h`` so it learns to predict y(t+h) from X(t) directly.
+    The forecast at origin t is compared against the realised y(t+h).
+
+    Returns
+    -------
+    all_forecasts : pd.DataFrame
+        MultiIndex (horizon, date) with columns [actual, bridge, midas, rw, ar1].
+    metrics_summary : pd.DataFrame
+        RMSE / MAE / MFE per (model, horizon).
+    """
+    from uk_cpi_nowcast.models.bridge import BridgeEquationModel
+    from uk_cpi_nowcast.models.midas import MIDASModel
+
+    bridge_kwargs = bridge_kwargs or {}
+    midas_kwargs = midas_kwargs or {}
+
+    idx = X.index.intersection(y.index)
+    X_all = X.loc[idx]
+    y_all = y.loc[idx]
+
+    start_ts = pd.Timestamp(start_date)
+    forecast_dates = y_all.index[y_all.index >= start_ts]
+
+    all_records: List[dict] = []
+
+    for h in horizons:
+        logger.info("Multi-horizon backtest: h=%d", h)
+        for t in forecast_dates:
+            train_mask = y_all.index < t
+            n_train = train_mask.sum()
+            if n_train < min_train:
+                continue
+
+            y_train = y_all.loc[train_mask]
+            X_train = X_all.loc[train_mask]
+
+            # The realised value we compare against is y(t+h)
+            t_h = t + pd.DateOffset(months=h)
+            y_actual = y_all.loc[t_h] if t_h in y_all.index else np.nan
+
+            record: dict = {"horizon": h, "date": t, "actual": y_actual}
+
+            # RW benchmark: y(t) as forecast of y(t+h)
+            record["rw"] = float(y_train.iloc[-1]) if len(y_train) > 0 else np.nan
+
+            # AR(h) benchmark
+            record["ar1"] = ar1_forecast(y_train, horizon=h)
+
+            # Bridge (horizon=h)
+            try:
+                bridge = BridgeEquationModel(horizon=h, **bridge_kwargs)
+                bridge.fit(X_train, y_train)
+                X_ctx = X_all.loc[:t]
+                pred_all = bridge.predict(X_ctx)
+                valid = pred_all.dropna()
+                record["bridge"] = float(valid.iloc[-1]) if not valid.empty else np.nan
+            except Exception as exc:
+                logger.warning("Bridge h=%d failed at %s: %s", h, t, exc)
+                record["bridge"] = np.nan
+
+            # MIDAS (horizon=h)
+            try:
+                midas = MIDASModel(horizon=h, **midas_kwargs)
+                midas.fit(X_train, y_train)
+                pred = midas.predict(X_all.loc[[t]])
+                record["midas"] = float(pred.iloc[0]) if not pred.isna().all() else np.nan
+            except Exception as exc:
+                logger.warning("MIDAS h=%d failed at %s: %s", h, t, exc)
+                record["midas"] = np.nan
+
+            all_records.append(record)
+
+    if not all_records:
+        return pd.DataFrame(), pd.DataFrame()
+
+    full_df = pd.DataFrame(all_records)
+
+    # Compute metrics per horizon
+    metric_rows: List[dict] = []
+    for h in horizons:
+        h_df = full_df[full_df["horizon"] == h].set_index("date")
+        actual = h_df["actual"].dropna()
+        rw_b = h_df["rw"]
+        ar1_b = h_df["ar1"]
+        for col in ["bridge", "midas", "rw", "ar1"]:
+            if col not in h_df.columns:
+                continue
+            m = evaluate_all(actual, h_df[col], benchmark_rw=rw_b,
+                             benchmark_ar=ar1_b, label=col)
+            m["horizon"] = h
+            metric_rows.append(m)
+
+    metrics_df = pd.DataFrame(metric_rows).set_index(["horizon", "model"])
+
+    logger.info(
+        "Multi-horizon backtest complete:\n%s",
+        metrics_df[["rmse", "mae"]].round(4).to_string(),
+    )
+    return full_df, metrics_df

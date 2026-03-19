@@ -52,6 +52,7 @@ class BridgeEquationModel:
         l1_ratio: float = MODEL_CFG.elasticnet_l1_ratio,
         max_lags: int = MODEL_CFG.max_lags,
         n_cv_splits: int = 5,
+        horizon: int = 1,
     ) -> None:
         self.regularisation = regularisation
         self.alpha = alpha or (
@@ -61,6 +62,7 @@ class BridgeEquationModel:
         self.l1_ratio = l1_ratio
         self.max_lags = max_lags
         self.n_cv_splits = n_cv_splits
+        self.horizon = horizon
 
         self._best_lags: Dict[str, int] = {}
         self._pipeline: Optional[Pipeline] = None
@@ -139,14 +141,20 @@ class BridgeEquationModel:
         y : pd.Series
             Monthly UK CPI YoY growth rate (target).
         """
-        logger.info("BridgeEquation: selecting lags for %d predictors…", X.shape[1])
-        self._best_lags = self._select_lags(X, y)
+        # Direct multi-step: target at horizon h is y(t+h) = y.shift(-h)
+        y_h = y.shift(-self.horizon) if self.horizon > 1 else y
+
+        logger.info(
+            "BridgeEquation (h=%d): selecting lags for %d predictors…",
+            self.horizon, X.shape[1],
+        )
+        self._best_lags = self._select_lags(X, y_h)
 
         X_lagged = self._build_lagged_features(X, self._best_lags)
         # Drop feature columns that are entirely NaN in this training window
         # (e.g. bdi before BDRY ETF launch in 2018) so they don't wipe every row.
         X_lagged = X_lagged.dropna(axis=1, how="all")
-        df = pd.concat([y, X_lagged], axis=1).dropna()
+        df = pd.concat([y_h, X_lagged], axis=1).dropna()
         if df.empty:
             raise ValueError("No valid training rows after lag alignment and NaN removal.")
 

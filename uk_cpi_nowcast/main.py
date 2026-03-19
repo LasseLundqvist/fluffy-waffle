@@ -82,9 +82,10 @@ def cli(
         else:
             forecasts_df, metrics_df = pd.DataFrame(), pd.DataFrame()
 
+        path_df: Optional[pd.DataFrame] = None
         if nowcast or lag_report:
-            _run_nowcast(X, y, forecasts_df, bridge_kwargs=bridge_kwargs,
-                         print_lags=lag_report)
+            path_df = _run_nowcast(X, y, forecasts_df, bridge_kwargs=bridge_kwargs,
+                                   print_lags=lag_report)
 
         if dashboard:
             _run_dashboard(
@@ -92,6 +93,7 @@ def cli(
                 metrics_df=metrics_df,
                 X=X,
                 y=y,
+                forecast_path=path_df,
                 output_path=Path(output) if output else None,
             )
 
@@ -156,7 +158,13 @@ def _run_nowcast(
     forecasts_df: pd.DataFrame,
     bridge_kwargs: Optional[dict] = None,
     print_lags: bool = False,
-) -> None:
+) -> Optional[pd.DataFrame]:
+    """
+    Generate nowcast for the current period and a 6-month direct forecast path.
+
+    Returns the forecast path DataFrame (horizons 1-6) for use by the dashboard,
+    or None if the nowcast fails.
+    """
     click.echo("\nGenerating nowcast for current period…")
     try:
         from uk_cpi_nowcast.models.bridge import BridgeEquationModel
@@ -173,14 +181,12 @@ def _run_nowcast(
         t = latest_X.index[0]
 
         # Bridge needs full X history so lag shifts have prior-row context.
-        # A single-row DataFrame shifted by lag >= 1 always produces NaN.
         bridge_pred_full = bridge.predict(X)
         valid_bridge = bridge_pred_full.dropna()
         bridge_scalar = float(valid_bridge.iloc[-1]) if not valid_bridge.empty else np.nan
         bridge_pred = pd.Series([bridge_scalar], index=[t])
 
-        # MIDAS: same context approach — cpi_mom_lag1 may be NaN for the
-        # current month if last month's release isn't out yet.
+        # MIDAS: same context approach.
         midas_pred_full = midas.predict(X)
         valid_midas = midas_pred_full.dropna()
         midas_scalar = float(valid_midas.iloc[-1]) if not valid_midas.empty else np.nan
@@ -198,7 +204,6 @@ def _run_nowcast(
         ensemble_pred = ensemble.predict(preds_df)
         ensemble_with_ci = ensemble.predict_with_intervals(preds_df)
 
-        t = latest_X.index[0]
         click.echo(f"\n{'='*52}")
         click.echo(f"  UK CPI Nowcast for: {t.strftime('%B %Y')}")
         click.echo(f"{'='*52}")
@@ -221,20 +226,71 @@ def _run_nowcast(
             arrow = "^" if delta > 0.0001 else "v" if delta < -0.0001 else "->"
             click.echo(f"  Direction vs last: {arrow} ({delta:+.3%})")
 
+        click.echo(f"{'='*52}")
+
+        # ── 6-month direct forecast path ────────────────────────────────────
+        click.echo("\n  6-Month Direct Forecast Path (MoM):")
+        click.echo(f"  {'H':<4} {'Target':<12} {'Bridge':>9} {'MIDAS':>9} {'Ensemble':>10}")
+        click.echo(f"  {'-'*48}")
+
+        HORIZONS = list(range(1, 7))
+        path_records = []
+        for h in HORIZONS:
+            bridge_h = BridgeEquationModel(horizon=h, **(bridge_kwargs or {}))
+            bridge_h.fit(X, y)
+            midas_h = MIDASModel(horizon=h)
+            midas_h.fit(X, y)
+
+            b_full = bridge_h.predict(X)
+            b_val = float(b_full.dropna().iloc[-1]) if not b_full.dropna().empty else np.nan
+            m_full = midas_h.predict(X)
+            m_val = float(m_full.dropna().iloc[-1]) if not m_full.dropna().empty else np.nan
+            ens_val = float(np.nanmean([b_val, m_val]))
+
+            target_month = t + pd.DateOffset(months=h)
+            path_records.append({
+                "horizon": h,
+                "target_month": target_month.strftime("%b %Y"),
+                "bridge": b_val,
+                "midas": m_val,
+                "ensemble": ens_val,
+            })
+
+            b_str = f"{b_val:+.3%}" if not np.isnan(b_val) else "  N/A  "
+            m_str = f"{m_val:+.3%}" if not np.isnan(m_val) else "  N/A  "
+            e_str = f"{ens_val:+.3%}" if not np.isnan(ens_val) else "  N/A  "
+            click.echo(
+                f"  h={h:<2} {target_month.strftime('%b %Y'):<12} "
+                f"{b_str:>9} {m_str:>9} {e_str:>10}"
+            )
+
+        path_df = pd.DataFrame(path_records).set_index("horizon")
+
+        # Cumulative 6-month comparison
+        cum_fcast = path_df["ensemble"].sum()
+        last_6_sum = y.iloc[-6:].sum() if len(y) >= 6 else np.nan
+        click.echo(f"\n  Cumulative 6-month forecast (ensemble): {cum_fcast:+.3%}")
+        if not np.isnan(last_6_sum):
+            click.echo(f"  Last 6 months actual (sum):             {last_6_sum:+.3%}")
+            direction = "^" if cum_fcast > last_6_sum + 0.001 else "v" if cum_fcast < last_6_sum - 0.001 else "->"
+            click.echo(f"  Inflation trend vs prev 6m:             {direction}")
         click.echo(f"{'='*52}\n")
 
         # Lag report
         if print_lags and hasattr(bridge, "best_lags_"):
-            click.echo("\nSelected lags per predictor (Bridge Equation CV):")
+            click.echo("\nSelected lags per predictor (Bridge Equation h=1 CV):")
             click.echo(f"  {'Variable':<35} {'Lag (months)':>12}")
             click.echo(f"  {'-'*35} {'-'*12}")
             for var, lag in sorted(bridge.best_lags_.items(), key=lambda x: -x[1]):
                 click.echo(f"  {var:<35} {lag:>12}")
             click.echo()
 
+        return path_df
+
     except Exception as exc:
         logger.error("Nowcast failed: %s", exc)
         click.echo(f"  FAIL Nowcast failed: {exc}", err=True)
+        return None
 
 
 def _run_dashboard(
@@ -242,6 +298,7 @@ def _run_dashboard(
     metrics_df: pd.DataFrame,
     X: pd.DataFrame,
     y: pd.Series,
+    forecast_path: Optional[pd.DataFrame] = None,
     output_path: Optional[Path] = None,
 ) -> None:
     click.echo("\nGenerating HTML dashboard…")
@@ -274,6 +331,8 @@ def _run_dashboard(
             lag_dict=lag_dict,
             latest_nowcast=latest_nowcast,
             previous_nowcast=previous_nowcast,
+            forecast_path=forecast_path,
+            y_actuals=y,
             output_path=output_path,
         )
         click.echo(f"  OK Dashboard saved to: {saved_path}")
