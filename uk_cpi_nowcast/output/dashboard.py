@@ -166,19 +166,26 @@ def make_forecast_path_chart(
             marker=dict(size=6),
         ))
 
-    fig.add_vline(
-        x=origin,
-        line_dash="dash",
-        line_color="#718096",
-        annotation_text="Forecast horizon",
-        annotation_position="top right",
-    )
-
-    # Shade the forecast region
-    fig.add_vrect(
-        x0=origin, x1=future_dates[-1],
-        fillcolor="rgba(0,48,135,0.04)",
-        layer="below", line_width=0,
+    origin_str = origin.strftime("%Y-%m-%d")
+    end_str = future_dates[-1].strftime("%Y-%m-%d")
+    fig.update_layout(
+        shapes=[
+            dict(
+                type="line",
+                x0=origin_str, x1=origin_str, y0=0, y1=1, yref="paper",
+                line=dict(color="#718096", dash="dash", width=1.5),
+            ),
+            dict(
+                type="rect",
+                x0=origin_str, x1=end_str, y0=0, y1=1, yref="paper",
+                fillcolor="rgba(0,48,135,0.04)", line_width=0, layer="below",
+            ),
+        ],
+        annotations=[dict(
+            x=origin_str, y=1.0, yref="paper",
+            text="Forecast origin", showarrow=False,
+            xanchor="left", font=dict(color="#718096", size=11),
+        )],
     )
 
     fig.update_layout(
